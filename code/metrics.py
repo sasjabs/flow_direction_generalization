@@ -4,41 +4,6 @@ import heapq
 import os
 from geopy.distance import geodesic
 
-class OverallRatio(object):
-    def __init__(self):
-        self.ratio = 0
-
-    def import_flowdir(self, flowdir_path):
-        self.flowdir_path = flowdir_path
-        self.flowdir_array = gdal_array.LoadFile(self.flowdir_path)
-        file = gdal.Open(self.flowdir_path)
-        gtf = list(file.GetGeoTransform())
-        proj = file.GetProjection()
-        self.nrows = self.flowdir_array.shape[0]
-        self.ncols = self.flowdir_array.shape[1]
-        self.gtf = gtf
-        self.pixelsize = self.gtf[1]
-        self.proj = proj
-
-    def calculate_ratio(self):
-        orthogonal_count = 0
-        diagonal_count = 0
-        for i in range(self.nrows):
-            for j in range(self.ncols):
-                cell = np.array((i,j))
-                cell_dir = self.flowdir_array[tuple(cell)]
-                if cell_dir in [1, 4, 16, 64]:
-                    orthogonal_count += 1
-                elif cell_dir in [2, 8, 32, 128]:
-                    diagonal_count += 1
-        if diagonal_count != 0:
-            self.ratio = orthogonal_count / diagonal_count
-        else:
-            self.ratio = 0
-
-    def execute(self):
-        self.calculate_ratio()
-        return self.ratio
 
 class WatershedStats(object):
     def __init__(self):
