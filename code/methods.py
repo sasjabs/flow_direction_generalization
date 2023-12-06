@@ -21,26 +21,36 @@ class COTAT(object):
         file = gdal.Open(path)
         gtf = list(file.GetGeoTransform())
         proj = file.GetProjection()
-        return array, gtf, proj
+        ndv = file.GetRasterBand(1).GetNoDataValue()
+        return array, gtf, proj, ndv
 
     def import_flowdir(self, flowdir_path):
-        flowdir_array, gtf, proj = self.import_raster(flowdir_path)
+        flowdir_array, gtf, proj, ndv = self.import_raster(flowdir_path)
+        # print(flowdir_array.dtype)
+        # self.flowdir_array = flowdir_array
         self.flowdir_array = self.stack_rows_and_cols(flowdir_array)
+        del flowdir_array
         self.nrows = self.flowdir_array.shape[0]
         self.ncols = self.flowdir_array.shape[1]
         self.gtf = gtf
         self.pixelsize = self.gtf[1]
         self.proj = proj
-        self.cells = np.zeros((self.flowdir_array.shape[0] // self.k, self.flowdir_array.shape[1] // self.k))
+        self.flowdir_ndv = ndv
+        self.cells = np.full((self.flowdir_array.shape[0] // self.k, self.flowdir_array.shape[1] // self.k), 255, dtype=np.uint8)
         self.mrows = self.cells.shape[0]
         self.mcols = self.cells.shape[1]
 
     def create_null_mask(self):
-        self.null_mask = (self.flowacc_array != 32767).astype(int)
+        self.null_mask = (self.flowacc_array != self.flowacc_ndv).astype(int)
 
     def import_flowacc(self, flowacc_path):
-        flowacc_array, gtf, proj = self.import_raster(flowacc_path)
+        flowacc_array, gtf, proj, ndv = self.import_raster(flowacc_path)
+        # print(flowacc_array.dtype)
+        # self.flowacc_array = flowacc_array
         self.flowacc_array = self.stack_rows_and_cols(flowacc_array)
+        self.flowacc_ndv = ndv
+        self.flowacc_array = np.where(self.flowacc_array == ndv, 0, self.flowacc_array)
+        del flowacc_array
 
     def save_result(self, path):
         gtf = self.gtf.copy()
@@ -53,6 +63,7 @@ class COTAT(object):
         gtiff = driver.Create(path, self.cells.shape[1], self.cells.shape[0], 1, gdal.GDT_Int32)
         gtiff.SetGeoTransform(gtf)
         gtiff.SetProjection(self.proj)
+        gtiff.GetRasterBand(1).SetNoDataValue(255)
         gtiff.GetRasterBand(1).WriteArray(self.cells)
         gtiff.FlushCache()
         gtiff = None
@@ -62,11 +73,14 @@ class COTAT(object):
         ncols = array.shape[1]
         rows_rem = nrows % self.k
         cols_rem = ncols % self.k
-
-        array_add = np.concatenate((array, np.zeros([nrows, cols_rem], dtype=int)), axis=1)
-        array_add = np.concatenate((array_add, np.zeros([rows_rem, ncols + cols_rem], dtype=int)), axis=0)
-
-        return array_add
+        
+        if rows_rem == 0 and cols_rem == 0:
+            
+            return array
+        
+        else:
+            
+            return np.concatenate((np.concatenate((array, np.zeros([nrows, cols_rem], dtype=np.uint32)), axis=1), np.zeros([rows_rem, ncols + cols_rem], dtype=np.uint32)), axis=0)
 
     def find_max(self, pixels):  # находит индексы максимального или минимального элемента массива
         result = np.where(pixels == np.amax(pixels))
@@ -184,8 +198,14 @@ class COTAT(object):
 
     def assign_outlet_pixels(self):
         self.cell_outlets = np.zeros_like(self.flowdir_array)
+        ncells = self.cells.shape[0] * self.cells.shape[1]
+        cnt = 0
+        interval = ncells // 100
         for i in range(self.cells.shape[0]):
             for j in range(self.cells.shape[1]):
+                if cnt % interval == 0:
+                    print(f'\t\tProcessing cell {cnt + 1} out of {ncells}')
+                cnt += 1
                 cell = np.array((i, j))
                 if not self.check_null_cell(cell):
                     outlet = self.cell_outlet_pixel(cell)
@@ -201,11 +221,11 @@ class COTAT(object):
         trace_count = 0
         while area_diff <= self.area_threshold:
             trace_count += 1
-            dir = self.flowdir_array[tuple(current_pixel)]
-            if dir == 0 or dir == 32767:
+            fdir = self.flowdir_array[tuple(current_pixel)]
+            if fdir == 0 or fdir == self.flowdir_ndv:
                 break
             prev_pixel = current_pixel
-            current_pixel = current_pixel + window[dir]
+            current_pixel = current_pixel + window[fdir]
             current_cell = self.identify_cell_by_pixel(current_pixel)
             if self.check_pixel_out_of_bounds(current_pixel) or self.check_cell_out_of_bounds(cell, current_cell):
                 latest_outlet = prev_pixel
@@ -259,10 +279,21 @@ class COTAT(object):
                         self.cells[i + 1, j] = 1
 
     def execute(self):
+        
+        print('\tCreating null mask...')
         self.create_null_mask()
+        
+        print('\tAssigning outlet pixels...')
         self.assign_outlet_pixels()
+        
+        ncells = self.mrows * self.mcols
+        cnt = 0
+        interval = ncells // 100
         for i in range(self.mrows):
             for j in range(self.mcols):
+                if cnt % interval == 0:
+                    print(f'\t\tProcessing cell {cnt + 1} out of {ncells}')
+                cnt += 1
                 cell = np.array((i, j))
                 if not self.check_null_cell(cell):
                     self.assign_cell_direction(cell)
@@ -287,21 +318,23 @@ class DMM(object):
         file = gdal.Open(path)
         gtf = list(file.GetGeoTransform())
         proj = file.GetProjection()
-        return (array, gtf, proj)
+        ndv = file.GetRasterBand(1).GetNoDataValue()
+        return array, gtf, proj, ndv
 
     def import_flowacc(self, flowacc_path):
-        flowacc_array, gtf, proj = self.import_raster(flowacc_path)
+        flowacc_array, gtf, proj, ndv = self.import_raster(flowacc_path)
         self.flowacc_array = self.stack_rows_and_cols(flowacc_array)
         self.nrows = self.flowacc_array.shape[0]
         self.ncols = self.flowacc_array.shape[1]
         self.gtf = gtf
         self.pixelsize = self.gtf[1]
         self.proj = proj
-        self.cells = np.zeros(
-            (self.flowacc_array.shape[0] // self.k - 1, self.flowacc_array.shape[1] // self.k - 1))
+        self.ndv = ndv
+        self.cells = np.full(
+            (self.flowacc_array.shape[0] // self.k - 1, self.flowacc_array.shape[1] // self.k - 1), 255, dtype=np.uint8)
         self.mrows = self.cells.shape[0]
         self.mcols = self.cells.shape[1]
-        self.null_mask = (self.flowacc_array > 0).astype(int)
+        self.null_mask = (self.flowacc_array != self.ndv).astype(int)
 
     def save_result(self, path):
         gtf = self.gtf.copy()
@@ -314,6 +347,7 @@ class DMM(object):
         gtiff = driver.Create(path, self.cells.shape[1], self.cells.shape[0], 1, gdal.GDT_Int32)
         gtiff.SetGeoTransform(gtf)
         gtiff.SetProjection(self.proj)
+        gtiff.GetRasterBand(1).SetNoDataValue(255)
         gtiff.GetRasterBand(1).WriteArray(self.cells)
         gtiff.FlushCache()
         gtiff = None
@@ -526,17 +560,19 @@ class NSA(object):
         file = gdal.Open(path)
         gtf = list(file.GetGeoTransform())
         proj = file.GetProjection()
-        return (array, gtf, proj)
+        ndv = file.GetRasterBand(1).GetNoDataValue()
+        return array, gtf, proj, ndv
 
     def import_flowacc(self, flowacc_path):
-        flowacc_array, gtf, proj = self.import_raster(flowacc_path)
+        flowacc_array, gtf, proj, ndv = self.import_raster(flowacc_path)
         self.flowacc_array = self.stack_rows_and_cols(flowacc_array)
         self.nrows = self.flowacc_array.shape[0]
         self.ncols = self.flowacc_array.shape[1]
         self.gtf = gtf
         self.pixelsize = self.gtf[1]
         self.proj = proj
-        self.cells = np.zeros((self.flowacc_array.shape[0] // self.k, self.flowacc_array.shape[1] // self.k))
+        self.ndv = ndv
+        self.cells = np.full((self.flowacc_array.shape[0] // self.k, self.flowacc_array.shape[1] // self.k), 255, dtype=np.uint8)
         self.flowacc_aggr = self.cells.copy()
         self.krows = self.cells.shape[0]
         self.kcols = self.cells.shape[1]
@@ -601,6 +637,7 @@ class NSA(object):
         gtiff.SetGeoTransform(gtf)
         gtiff.SetProjection(self.proj)
         gtiff.GetRasterBand(1).WriteArray(self.cells)
+        gtiff.GetRasterBand(1).SetNoDataValue(255)
         gtiff.FlushCache()
         gtiff = None
 
